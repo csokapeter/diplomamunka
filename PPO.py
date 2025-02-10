@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+import numpy as np
+from torch.distributions import Categorical
 
 
 use_cuda = torch.cuda.is_available()
-device = torch.device('cuda' if use_cuda else 'cpu')
+device = 'cpu'#torch.device('cuda' if use_cuda else 'cpu')
 print(f'using device: {device}')
 
 
@@ -16,12 +17,13 @@ def init_weights(m):
 
 class Memory:
     def __init__(self):
-        self.log_probs: list[float] = []
-        self.values: list[float] = []
-        self.states: list[torch.tensor] = []
-        self.actions: list[torch.tensor] = []
-        self.rewards: list[float] = []
-        self.masks: list[float] = []
+        self.log_probs = []
+        self.values = []
+        self.states = []
+        self.actions = []
+        self.valid_action_masks = []
+        self.rewards = []
+        self.masks = []
 
 
     def discard_obs(self, val):
@@ -29,12 +31,13 @@ class Memory:
         self.values = self.values[-val:]
         self.states = self.states[-val:]
         self.actions = self.actions[-val:]
+        self.valid_action_masks = [self.valid_action_masks[-val:]]
         self.rewards = self.rewards[-val:]
         self.masks = self.masks[-val:]
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, num_inputs, num_outputs, hidden_size, action_std):
+    def __init__(self, num_inputs, num_outputs, hidden_size):
         super(ActorCritic, self).__init__()
 
         self.num_outputs = num_outputs
@@ -53,38 +56,35 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, num_outputs),
-            nn.Tanh()
+            nn.Softmax()
         )
 
-        # self.action_std = torch.tensor([action_std, action_std])
-        self.log_action_std = nn.Parameter(torch.zeros(num_outputs))
         self.apply(init_weights)
 
 
-    def forward(self, x):
+    def forward(self, x, valid_action_mask):
         value = self.critic(x)
-        mu = self.actor(x)
-        log_action_std = self.log_action_std.expand_as(mu)
-        std = torch.exp(log_action_std)
-        # std = self.action_std.expand_as(mu).to(device)
-        dist = Normal(mu, std)
+        logits = self.actor(x)
+        masked_logits = logits + (valid_action_mask - 1) * 1e9
+        dist = Categorical(logits=masked_logits)
         return dist, value
 
 
 class PPO:
-    def __init__(self, num_inputs, num_outputs, lr, action_std, agent_ids, hidden_size=128, ppo_epochs=8, mini_batch_size=2048):
+    def __init__(self, num_inputs, num_outputs, lr, agent_ids, hidden_size=128, ppo_epochs=8, mini_batch_size=2048):
 
         self.num_inputs = num_inputs
         self.ppo_epochs = ppo_epochs
         self.mini_batch_size = mini_batch_size
         self.hidden_size = hidden_size
 
-        self.model = ActorCritic(num_inputs, num_outputs, hidden_size, action_std).to(device)
+        self.model = ActorCritic(num_inputs, num_outputs, hidden_size).to(device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        self.agent_memories = {agent_id: Memory() for agent_id in agent_ids}
+        self.memories = {agent_id: Memory() for agent_id in agent_ids}
         self.state = {}
         self.dist = {}
         self.action = {}
+        self.valid_action_mask = {}
         self.value = {}
 
 
@@ -92,11 +92,6 @@ class PPO:
         print(f"Updating learning rate to: {learning_rate}")
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = learning_rate
-
-
-    def set_action_std(self, action_std):
-        print(f'Updating standard deviation to: {self.model.action_std}')
-        self.model.action_std = torch.tensor([action_std, action_std])
 
 
     def compute_gae(self, next_value, rewards, masks, values, gamma=0.99, lambd=0.95):
@@ -114,24 +109,24 @@ class PPO:
         return returns.to(device), advantages.to(device)
 
 
-    def ppo_iter(self, mini_batch_size, states, actions, log_probs, returns, advantage):
+    def ppo_iter(self, mini_batch_size, states, actions, valid_action_masks, log_probs, returns, advantage):
         batch_size = states.size(0)
         rand_ids = torch.randperm(batch_size)
 
         for start in range(0, batch_size, mini_batch_size):
             idx = rand_ids[start: start + mini_batch_size]
-            yield states[idx], actions[idx], log_probs[idx], returns[idx], advantage[idx]
+            yield states[idx], actions[idx], valid_action_masks[idx], log_probs[idx], returns[idx], advantage[idx]
 
 
-    def ppo_update(self, ppo_epochs, mini_batch_size, states, actions, log_probs, returns, advantages, agent_id, clip_param=0.2):
+    def ppo_update(self, ppo_epochs, mini_batch_size, states, actions, valid_action_masks, log_probs, returns, advantages, agent_id, clip_param=0.2):
         actor_loss, critic_loss, loss = 0, 0, 0
 
         for _ in range(ppo_epochs):
 
-            for state, action, old_log_probs, return_, advantage in self.ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantages):
-                new_dist, new_value = self.model(state)
+            for state, action, valid_action_mask, old_log_probs, return_, advantage in self.ppo_iter(mini_batch_size, states, actions, valid_action_masks, log_probs, returns, advantages):
+                new_dist, new_value = self.model(state, valid_action_mask)
                 entropy = new_dist.entropy().mean()
-                new_log_probs = new_dist.log_prob(action).sum(-1)
+                new_log_probs = new_dist.log_prob(action)
 
                 ratio = torch.exp(new_log_probs - old_log_probs)
                 surr1 = ratio * advantage
@@ -148,50 +143,58 @@ class PPO:
                 loss.backward()
                 self.optimizer.step()
 
-        self.agent_memories[agent_id].discard_obs((len(self.agent_memories[agent_id].log_probs) // 4) * 3)
+        self.memories[agent_id].discard_obs((len(self.memories[agent_id].log_probs) // 4) * 3)
 
         return actor_loss, critic_loss, loss
 
 
-    def select_action(self, agent_id, state):
+    def select_action(self, agent_id, state, valid_action_mask):
         with torch.no_grad():
             self.state[agent_id] = state
-            self.dist[agent_id], self.value[agent_id] = self.model(self.state[agent_id])
+            self.dist[agent_id], self.value[agent_id] = self.model(self.state[agent_id], valid_action_mask)
             self.action[agent_id] = self.dist[agent_id].sample()
+            self.valid_action_mask[agent_id] = valid_action_mask
 
-        return self.action[agent_id].cpu().numpy()
+        return self.action[agent_id].cpu().item()
 
 
-    def store_obs(self, agent_id, reward, done):
+    def store_obs(self, agent_id):
         with torch.no_grad():
             log_prob = self.dist[agent_id].log_prob(self.action[agent_id]).sum(-1)
 
-        self.agent_memories[agent_id].log_probs.append(log_prob.item())
-        self.agent_memories[agent_id].values.append(self.value[agent_id].item())
-        self.agent_memories[agent_id].rewards.append(reward)
-        self.agent_memories[agent_id].masks.append(float(1 - done))
-        self.agent_memories[agent_id].states.append(self.state[agent_id])
-        self.agent_memories[agent_id].actions.append(self.action[agent_id])
+        self.memories[agent_id].log_probs.append(log_prob.item())
+        self.memories[agent_id].values.append(self.value[agent_id].item())
+        self.memories[agent_id].rewards.append(0)
+        self.memories[agent_id].valid_action_masks.append(self.valid_action_mask[agent_id])
+        self.memories[agent_id].masks.append(1.)
+        self.memories[agent_id].states.append(self.state[agent_id])
+        self.memories[agent_id].actions.append(self.action[agent_id])
+
+    
+    def update_reward_done(self, agent_id, num_actions_taken, reward):
+        for i in range(1, num_actions_taken + 1):
+            self.memories[agent_id].rewards[-i] = reward
+        self.memories[agent_id].masks[-1] = 0.
+
+        # print(f'{self.memories[agent_id].log_probs =}')
+        # print(f'{self.memories[agent_id].values =}')
+        # print(f'{self.memories[agent_id].states =}')
+        # print(f'{self.memories[agent_id].actions =}')
+        # print(f'{self.memories[agent_id].rewards =}')
+        # print(f'{self.memories[agent_id].masks =}')
 
 
-    def num_of_stored_obs(self, agent_id):
-        return len(self.agent_memories[agent_id].log_probs)
-
-
-    def update(self, agent_id, next_state):
-        states = torch.vstack(self.agent_memories[agent_id].states).to(device)
-        actions = torch.vstack(self.agent_memories[agent_id].actions).to(device)
-        log_probs = torch.tensor(self.agent_memories[agent_id].log_probs).to(device)
-
-        with torch.no_grad():
-            _, next_value = self.model(next_state)
-            next_value = next_value.item()
+    def update(self, agent_id):
+        states = torch.vstack(self.memories[agent_id].states).to(device)
+        actions = torch.vstack(self.memories[agent_id].actions).to(device)
+        valid_action_masks = torch.vstack(self.memories[agent_id].valid_action_masks).to(device)
+        log_probs = torch.tensor(self.memories[agent_id].log_probs).to(device)
 
         returns, advantages = self.compute_gae(
-            next_value,
-            self.agent_memories[agent_id].rewards,
-            self.agent_memories[agent_id].masks,
-            self.agent_memories[agent_id].values
+            0,
+            self.memories[agent_id].rewards,
+            self.memories[agent_id].masks,
+            self.memories[agent_id].values
         )
 
         actor_loss, critic_loss, entropy = self.ppo_update(
@@ -199,11 +202,17 @@ class PPO:
             self.mini_batch_size,
             states,
             actions,
+            valid_action_masks,
             log_probs,
             returns,
             advantages,
-            agent_id
+            agent_id,
+            clip_param=0.1
         )
+
+
+    def num_of_stored_obs(self, agent_id):
+        return len(self.memories[agent_id].log_probs)
 
 
     def save_weights(self, filename, directory):
@@ -222,6 +231,5 @@ class PPO:
         random_weights = (torch.rand(self.hidden_size, additional_dim) - 0.5).to(device)
         state_dict['actor.0.weight'] = torch.cat((state_dict['actor.0.weight'].to(device), random_weights), 1)
         state_dict['critic.0.weight'] = torch.cat((state_dict['critic.0.weight'][:, :self.num_inputs-additional_dim].to(device), random_weights, state_dict['critic.0.weight'][:, self.num_inputs-additional_dim:].to(device)), 1)
-        # state_dict['log_action_std'] = torch.zeros(2).to(device)
 
         self.model.load_state_dict(state_dict)
