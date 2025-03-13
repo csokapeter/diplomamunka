@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -5,7 +6,8 @@ from torch.distributions import Categorical
 
 
 use_cuda = torch.cuda.is_available()
-device = 'cpu'#torch.device('cuda' if use_cuda else 'cpu')
+# device = torch.device('cuda' if use_cuda else 'cpu')
+device = 'cpu'
 print(f'using device: {device}')
 
 
@@ -26,14 +28,14 @@ class Memory:
         self.masks = []
 
 
-    def discard_obs(self, val):
-        self.log_probs = self.log_probs[-val:]
-        self.values = self.values[-val:]
-        self.states = self.states[-val:]
-        self.actions = self.actions[-val:]
-        self.valid_action_masks = [self.valid_action_masks[-val:]]
-        self.rewards = self.rewards[-val:]
-        self.masks = self.masks[-val:]
+    def discard_obs(self):
+        self.log_probs = []
+        self.values = []
+        self.states = []
+        self.actions = []
+        self.valid_action_masks = []
+        self.rewards = []
+        self.masks = []
 
 
 class ActorCritic(nn.Module):
@@ -47,6 +49,14 @@ class ActorCritic(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
             nn.Linear(hidden_size, 1)
         )
 
@@ -55,6 +65,14 @@ class ActorCritic(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(),
             nn.Linear(hidden_size, num_outputs),
             nn.Softmax()
         )
@@ -71,12 +89,14 @@ class ActorCritic(nn.Module):
 
 
 class PPO:
-    def __init__(self, num_inputs, num_outputs, lr, agent_ids, hidden_size=128, ppo_epochs=8, mini_batch_size=2048):
+    # def __init__(self, num_inputs, num_outputs, lr, agent_ids, hidden_size=128, ppo_epochs=8, mini_batch_size=2048):
+    def __init__(self, num_inputs, num_outputs, lr, agent_ids, hidden_size=128, ppo_epochs=3, mini_batch_size=64, inference=False):
 
         self.num_inputs = num_inputs
         self.ppo_epochs = ppo_epochs
         self.mini_batch_size = mini_batch_size
         self.hidden_size = hidden_size
+        self.inference = inference
 
         self.model = ActorCritic(num_inputs, num_outputs, hidden_size).to(device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
@@ -143,19 +163,27 @@ class PPO:
                 loss.backward()
                 self.optimizer.step()
 
-        self.memories[agent_id].discard_obs((len(self.memories[agent_id].log_probs) // 4) * 3)
+        self.memories[agent_id].discard_obs()
 
         return actor_loss, critic_loss, loss
 
 
-    def select_action(self, agent_id, state, valid_action_mask):
-        with torch.no_grad():
-            self.state[agent_id] = state
-            self.dist[agent_id], self.value[agent_id] = self.model(self.state[agent_id], valid_action_mask)
-            self.action[agent_id] = self.dist[agent_id].sample()
-            self.valid_action_mask[agent_id] = valid_action_mask
-
-        return self.action[agent_id].cpu().item()
+    def select_action(self, agent_id, state, valid_action_mask, pick_random=False):
+        if not pick_random:
+            with torch.no_grad():
+                if not self.inference:
+                    self.state[agent_id] = state
+                    self.dist[agent_id], self.value[agent_id] = self.model(self.state[agent_id], valid_action_mask)
+                    self.action[agent_id] = self.dist[agent_id].sample()
+                    action = self.action[agent_id].cpu().item()
+                    self.valid_action_mask[agent_id] = valid_action_mask
+                elif self.inference:
+                    dist, _ = self.model(state, valid_action_mask)
+                    action = torch.argmax(dist.probs).cpu()
+            return action
+        else:
+            valid_indices = np.where(valid_action_mask.cpu())[0]
+            return np.random.choice(valid_indices)
 
 
     def store_obs(self, agent_id):
@@ -172,16 +200,8 @@ class PPO:
 
     
     def update_reward_done(self, agent_id, num_actions_taken, reward):
-        for i in range(1, num_actions_taken + 1):
-            self.memories[agent_id].rewards[-i] = reward
+        self.memories[agent_id].rewards[-1] = reward
         self.memories[agent_id].masks[-1] = 0.
-
-        # print(f'{self.memories[agent_id].log_probs =}')
-        # print(f'{self.memories[agent_id].values =}')
-        # print(f'{self.memories[agent_id].states =}')
-        # print(f'{self.memories[agent_id].actions =}')
-        # print(f'{self.memories[agent_id].rewards =}')
-        # print(f'{self.memories[agent_id].masks =}')
 
 
     def update(self, agent_id):
@@ -206,9 +226,10 @@ class PPO:
             log_probs,
             returns,
             advantages,
-            agent_id,
-            clip_param=0.1
+            agent_id
         )
+
+        return actor_loss, critic_loss
 
 
     def num_of_stored_obs(self, agent_id):
@@ -233,3 +254,19 @@ class PPO:
         state_dict['critic.0.weight'] = torch.cat((state_dict['critic.0.weight'][:, :self.num_inputs-additional_dim].to(device), random_weights, state_dict['critic.0.weight'][:, self.num_inputs-additional_dim:].to(device)), 1)
 
         self.model.load_state_dict(state_dict)
+
+    def load_pretrained_imitation(self, filename, directory):
+        filepath = os.path.join(directory, filename)
+        state_dict = torch.load(filepath, map_location=lambda storage, loc: storage)
+        new_state_dict = {}
+        new_state_dict['0.weight'] = state_dict['fc1.weight']
+        new_state_dict['0.bias'] = state_dict['fc1.bias']
+        new_state_dict['2.weight'] = state_dict['fc2.weight']
+        new_state_dict['2.bias'] = state_dict['fc2.bias']
+        new_state_dict['4.weight'] = state_dict['fc3.weight']
+        new_state_dict['4.bias'] = state_dict['fc3.bias']
+        new_state_dict['6.weight'] = state_dict['output.weight']
+        new_state_dict['6.bias'] = state_dict['output.bias']
+        self.model.actor.load_state_dict(new_state_dict)
+
+        print(f'Pretrained weights loaded from {filepath}')

@@ -105,9 +105,6 @@ def test_agent(agent, agent_ids, num_games):
                     p.chips += pot.side_pot // len(side_pot_winners)
 
             for p in players:
-                reward = p.chips - p.chips_at_start_of_ep
-                if p.num_actions_this_episode > 0:
-                    agent.update_reward_done(p.id, p.num_actions_this_episode, reward)
                 p.folded = False
                 p.is_all_in = False
                 p.actions_taken = 0
@@ -143,6 +140,7 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
     current_player = starting_player
     pot.main_pot_cutoff = current_highest_bet
     pot.side_pot_cutoff = 0
+    t = -1
 
     for p in players:
         if p.is_all_in:
@@ -187,7 +185,8 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
                     if p in pot.side_pot_contributors:
                         pot.side_pot_contributors.remove(p)
                 elif action == 2:
-                    p.call(pot.main_pot_cutoff + pot.side_pot_cutoff)
+                    # p.call(pot.main_pot_cutoff + pot.side_pot_cutoff)
+                    p.call(current_highest_bet)
                     if is_sidepot and p.current_bet < pot.side_pot_cutoff:
                         pot.side_pot_cutoff = p.current_bet
                     elif p.current_bet < pot.main_pot_cutoff:
@@ -196,6 +195,7 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
                         
             else:
                 if p.current_bet < current_highest_bet:
+                    t = 0
                     # action = get_player_action(['call', 'raise', 'fold'])
                     valid_action_mask = torch.tensor([1., 0., 1., 1., 1.]).to(device)
                     action = agent.select_action(p.id, torch.tensor(obs, dtype=torch.float32).to(device), valid_action_mask, p.takes_random_actions)
@@ -211,9 +211,9 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
                     elif action > 2:
                         if action == 3:
                             raise_amount = current_highest_bet + (2 - (current_highest_bet == big_blind)) * big_blind
+                        # elif action == 4:
+                        #     raise_amount = current_highest_bet + 4 * big_blind
                         elif action == 4:
-                            raise_amount = current_highest_bet + 4 * big_blind
-                        elif action == 5:
                             raise_amount = current_highest_bet + 15 * big_blind
                         actual_raise_amount = p.raise_bet(raise_amount, current_highest_bet)
                         current_highest_bet += actual_raise_amount
@@ -223,6 +223,7 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
                             pot.main_pot_cutoff += actual_raise_amount
 
                 else:
+                    t = 1
                     # action = get_player_action(['check', 'raise'])
                     valid_action_mask = torch.tensor([0., 1., 0., 1., 1.]).to(device)
                     action = agent.select_action(p.id, torch.tensor(obs, dtype=torch.float32).to(device), valid_action_mask, p.takes_random_actions)
@@ -230,9 +231,9 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
                     if action > 2:
                         if action == 3:
                             raise_amount = current_highest_bet + (2 - (current_highest_bet == big_blind)) * big_blind
+                        # elif action == 4:
+                        #     raise_amount = current_highest_bet + 4 * big_blind
                         elif action == 4:
-                            raise_amount = current_highest_bet + 4 * big_blind
-                        elif action == 5:
                             raise_amount = current_highest_bet + 15 * big_blind
                         actual_raise_amount = p.raise_bet(raise_amount, current_highest_bet)
                         current_highest_bet += actual_raise_amount
@@ -242,9 +243,14 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
                             pot.main_pot_cutoff += actual_raise_amount
 
             p.actions_taken += 1
-            agent.store_obs(p.id)
+            if p.designated_agent:
+                agent.store_obs(p.id)
             # print(f'{action =}')
             p.num_actions_this_episode += 1
+            if p.num_actions_this_episode > 50:
+                print(p.current_bet, current_highest_bet, p.is_all_in, p.folded, p.actions_taken, t)
+                print('NUM ACT IS BIGGER THAN 50 HELP')
+                break
             # input('q')
 
         current_player = (current_player + 1) % num_players
@@ -300,7 +306,7 @@ def betting_round(agent, players, community_cards, pot, big_blind, num_blind_inc
         if not p.folded and not p.is_all_in:
             p.actions_taken = 0
 
-def main(agent, game_idx, num_players):
+def main(agent, expert_agent, game_idx, num_players):
     # Game parameters
     # num_players = 3
     
@@ -316,9 +322,9 @@ def main(agent, game_idx, num_players):
     # Training parameters
     init_episode = 0
     max_episodes = 1_000_000_000_000
-    weight_save_freq = 50_000
+    weight_save_freq = 10_000
     batch_size = 32 # 512
-    buffer_size = 128 # batch_size * 20
+    buffer_size = 256 # batch_size * 20
     episodes = {agent_id: init_episode for agent_id in agent_ids}
     cum_episode = init_episode
     today = date.today().strftime('%Y-%m-%d')
@@ -333,10 +339,13 @@ def main(agent, game_idx, num_players):
     while cum_episode < max_episodes:
         starting_chips = 150
         players = [Player(starting_chips, agent_ids[i]) for i in range(num_players)]
+        players[0].designated_agent = True
         dealer_position = 0
         num_blind_posted = 1
         num_blind_increase = 0
         small_blind = 5
+
+        cum_reward = 0
 
         while len(players) > 1:
             deck = Deck()
@@ -424,7 +433,8 @@ def main(agent, game_idx, num_players):
             # print(f"Final pot size: {pot.main_pot}")
             for p in players:
                 reward = p.chips - p.chips_at_start_of_ep
-                if p.num_actions_this_episode > 0:
+                if p.num_actions_this_episode > 0 and p.designated_agent:
+                    cum_reward += reward
                     agent.update_reward_done(p.id, p.num_actions_this_episode, reward)
                 p.folded = False
                 p.is_all_in = False
@@ -446,6 +456,8 @@ def main(agent, game_idx, num_players):
                     writer.flush()
 
                 if cum_episode % weight_save_freq == 0:
+                    print(f'avg reward in last {weight_save_freq}: {cum_reward/weight_save_freq}')
+                    cum_reward = 0
                     agent.inference = True
                     winrate = test_agent(agent, agent_ids, 1000)
                     agent.inference = False
@@ -475,7 +487,10 @@ def run_game_process(rank, model, device):
     agent = PPO(num_inputs, num_outputs, lr, agent_ids=list(range(num_players * num_parallel_games)), hidden_size=hidden_size, inference=False)
     agent.model = model
 
-    main(agent, rank, num_players)
+    expert_agent = PPO(num_inputs, num_outputs, lr, agent_ids=[0], hidden_size=hidden_size, inference=True)
+    expert_agent.model = model
+
+    main(agent, expert_agent, rank, num_players)
     
     print(f"Process {rank} finished.")
 
