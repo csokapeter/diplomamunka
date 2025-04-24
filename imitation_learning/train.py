@@ -43,14 +43,14 @@ class MLP(nn.Module):
         self.fc3 = nn.Linear(256, 256)
         self.dropout1 = nn.Dropout(dropout_rate)
         self.output = nn.Linear(256, num_classes)
-        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
 
     def forward(self, x):
-        x = self.relu(self.fc1(x))
+        x = self.tanh(self.fc1(x))
         x = self.dropout1(x)
-        x = self.relu(self.fc2(x))
+        x = self.tanh(self.fc2(x))
         x = self.dropout1(x)
-        x = self.relu(self.fc3(x))
+        x = self.tanh(self.fc3(x))
         x = self.dropout1(x)
         x = self.output(x)
         return x
@@ -61,7 +61,7 @@ model = MLP(input_size, num_classes)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-epochs = 150
+epochs = 300
 train_losses, eval_losses = [], []
 
 for epoch in tqdm(range(epochs)):
@@ -94,7 +94,7 @@ for epoch in tqdm(range(epochs)):
     accuracy = correct / total * 100
     print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_losses[-1]:.4f}, Eval Loss: {eval_losses[-1]:.4f}, Accuracy: {accuracy:.2f}%')
 
-torch.save(model.state_dict(), 'pretrained.pth')
+torch.save(model.state_dict(), 'pretrained_tanh.pth')
 print('Model weights saved to pretrained.pth')
 
 plt.plot(range(1, epochs+1), train_losses, label='Train Loss')

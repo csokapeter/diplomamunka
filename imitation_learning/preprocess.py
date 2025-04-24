@@ -21,8 +21,8 @@ counts = df.iloc[:, -1].value_counts().sort_index()
 plt.bar(counts.index, counts.values, tick_label=counts.index)
 plt.xlabel("Value")
 plt.ylabel("Count")
-plt.title("Distribution of Last Column Values")
+plt.title("Distribution of expert actions")
 plt.show()
 
 
-df.to_csv("expert_act_prep_5_action.csv", index=False, header=False)
+# df.to_csv("expert_act_prep_5_action.csv", index=False, header=False)

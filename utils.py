@@ -50,14 +50,14 @@ def has_open_ended_draw(hand, community_cards):
     return match_counts
 
 
-def get_no_suit_hero(hand, community_cards):
+def get_num_suit_hero(hand, community_cards):
     all_cards = hand + community_cards
     suit_counts = Counter(card.suit for card in all_cards)
 
     return max(suit_counts[hand[0].suit], suit_counts[hand[1].suit])
 
 
-def get_no_suit_villain(hand, community_cards):
+def get_num_suit_villain(hand, community_cards):
     all_cards = hand + community_cards
     suit_counts = Counter(card.suit for card in all_cards)
     player_suits = {hand[0].suit, hand[1].suit}
@@ -66,7 +66,7 @@ def get_no_suit_villain(hand, community_cards):
     return max(villain_suit_counts.values(), default=0)
 
 
-def get_no_same_cards(hand, community_cards):
+def get_num_same_cards(hand, community_cards):
     all_cards = hand + community_cards
     value_counts = Counter(card.value for card in all_cards)
 
@@ -165,28 +165,36 @@ def get_obs(hand, community_cards, num_blind_increase, street, player, players):
     card_idx = get_card_index(hand) / 100
     num_gutshots = get_num_gutshots(hand, community_cards) / 2
     num_gutshots_community = get_num_gutshots_community(community_cards) / 2
-    open_ended = has_open_ended_draw(hand, community_cards)
-    hero_no_s = get_no_suit_hero(hand, community_cards) / 7
-    villain_no_s = get_no_suit_villain(hand, community_cards) / 5
-    no_same_cards = get_no_same_cards(hand, community_cards) / 4
+    is_open_ended = has_open_ended_draw(hand, community_cards)
+    hero_num_s = get_num_suit_hero(hand, community_cards) / 7
+    villain_num_s = get_num_suit_villain(hand, community_cards) / 5
+    num_same_cards = get_num_same_cards(hand, community_cards) / 4
     two_pairs = has_two_pairs(hand, community_cards)
     straight = has_straight(hand, community_cards)
     full_house = has_full_house(hand, community_cards)
     straight_flush = has_straight_flush(hand, community_cards)
     player_pos = player.position / 3
     
-    # not sure this is correct
     pos = 0
+    sb_pos = 0
+    bb_pos = 0
+    dealer_pos = 0
     if len(players) == 2:
-        dealer_pos = 2
-    for p in players:
-        if p.position == 0:
-            dealer_pos = pos
-        elif p.position == 1:
-            sb_pos = pos
-        else:
-            bb_pos = pos
-        pos += 1
+        for p in players:
+            if p.position == 0:
+                sb_pos = dealer_pos = pos
+            elif p.position == 2:
+                bb_pos = pos
+            pos += 1
+    else:
+        for p in players:
+            if p.position == 0:
+                dealer_pos = pos
+            elif p.position == 1:
+                sb_pos = pos
+            else:
+                bb_pos = pos
+            pos += 1
 
     bins = np.array([0, 37.5, 75, 112.5, 150, 225, 300, 450])
     if len(players) > 2:
@@ -197,17 +205,17 @@ def get_obs(hand, community_cards, num_blind_increase, street, player, players):
         last_actions = [players[i].last_action for i in [sb_pos, bb_pos] if players[i].position != player.position]
         last_actions.append(-1)
 
-    stack_of_players = np.array(stack_of_players) / 7 # / 450
+    street /= 3
+    stack_of_players = np.array(stack_of_players) / 7
     last_actions = np.array(last_actions) / 6
-    
     
     obs = [card_idx,
            num_gutshots,
            num_gutshots_community,
-           open_ended,
-           hero_no_s,
-           villain_no_s,
-           no_same_cards,
+           is_open_ended,
+           hero_num_s,
+           villain_num_s,
+           num_same_cards,
            two_pairs,
            straight,
            full_house,
@@ -221,46 +229,117 @@ def get_obs(hand, community_cards, num_blind_increase, street, player, players):
     return obs
 
 
-# def get_obs(hand, community_cards, num_blind_increase, street, player, players):
-#     card_idx = get_card_index(hand) / 100
-#     if len(community_cards) == 0:
-#         hand_eval = -1
-#     else:
-#         hand_eval = evaluate_cards(*[str(h) for h in hand + community_cards]) / 7462
-#     player_pos = player.position / 3
+def one_hot_encode(card):
+    suits = 'shdc'
+    values = '23456789TJQKA'
+    value, suit = card.value, card.suit
     
-#     # not sure this is correct
-#     pos = 0
-#     if len(players) == 2:
-#         dealer_pos = 2
-#     for p in players:
-#         if p.position == 0:
-#             dealer_pos = pos
-#         elif p.position == 1:
-#             sb_pos = pos
-#         else:
-#             bb_pos = pos
-#         pos += 1
+    # One-hot encode value
+    value_one_hot = np.zeros(len(values), dtype=int)
+    value_one_hot[values.index(value)] = 1
+    
+    # One-hot encode suit
+    suit_one_hot = np.zeros(len(suits), dtype=int)
+    suit_one_hot[suits.index(suit)] = 1
+    
+    return np.append(value_one_hot, suit_one_hot)
 
-#     bins = np.array([0, 37.5, 75, 112.5, 150, 225, 300, 450])
-#     if len(players) > 2:
-#         stack_of_players = (len(bins) - np.digitize([players[sb_pos].chips, players[bb_pos].chips, players[dealer_pos].chips], bins) - 1)
-#         last_actions = [players[i].last_action for i in [sb_pos, bb_pos, dealer_pos] if players[i].position != player.position]
-#     else:
-#         stack_of_players = len(bins) - np.digitize([players[sb_pos].chips, players[bb_pos].chips, 0], bins) - 1
-#         last_actions = [players[i].last_action for i in [sb_pos, bb_pos] if players[i].position != player.position]
-#         last_actions.append(-1)
 
-#     stack_of_players = np.array(stack_of_players) / 7 # / 450
-#     last_actions = np.array(last_actions) / 6
+def get_obs_one_hot(hand, community_cards, player, players):
+    cards = np.array([])
+    for card in hand+community_cards:
+        cards = np.append(cards, one_hot_encode(card))
+
+    while len(cards) < 7*17:
+        cards = np.append(cards, -1)
+
+    cards = cards.tolist()
+
+    pos = 0
+    sb_pos = 0
+    bb_pos = 0
+    dealer_pos = 0
+    if len(players) == 2:
+        for p in players:
+            if p.position == 0:
+                sb_pos = dealer_pos = pos
+            elif p.position == 2:
+                bb_pos = pos
+            pos += 1
+    else:
+        for p in players:
+            if p.position == 0:
+                dealer_pos = pos
+            elif p.position == 1:
+                sb_pos = pos
+            else:
+                bb_pos = pos
+            pos += 1
+
+    if len(players) > 2:
+        last_actions = [players[i].last_action for i in [sb_pos, bb_pos, dealer_pos] if players[i].position != player.position]
+    else:
+        last_actions = [players[i].last_action for i in [sb_pos, bb_pos] if players[i].position != player.position]
+        last_actions.append(-1)
+
+    last_actions = np.array(last_actions) / 6
     
     
-#     obs = [card_idx,
-#            hand_eval,
-#            num_blind_increase,
-#            street,
-#            player_pos,
-#            *stack_of_players,
-#            *last_actions]
+    obs = [*cards,
+           *last_actions]
 
-#     return obs
+    return obs
+
+
+def get_obs_min(hand, community_cards, num_blind_increase, street, player, players):
+    card_idx = get_card_index(hand) / 100
+    if len(community_cards) == 0:
+        hand_eval = -1
+    else:
+        hand_eval = evaluate_cards(*[str(h) for h in hand + community_cards]) / 7462
+    player_pos = player.position / 3
+    
+    pos = 0
+    sb_pos = 0
+    bb_pos = 0
+    dealer_pos = 0
+    if len(players) == 2:
+        for p in players:
+            if p.position == 0:
+                sb_pos = dealer_pos = pos
+            elif p.position == 2:
+                bb_pos = pos
+            pos += 1
+    else:
+        for p in players:
+            if p.position == 0:
+                dealer_pos = pos
+            elif p.position == 1:
+                sb_pos = pos
+            else:
+                bb_pos = pos
+            pos += 1
+
+    bins = np.array([0, 37.5, 75, 112.5, 150, 225, 300, 450])
+    if len(players) > 2:
+        stack_of_players = (len(bins) - np.digitize([players[sb_pos].chips, players[bb_pos].chips, players[dealer_pos].chips], bins) - 1)
+        last_actions = [players[i].last_action for i in [sb_pos, bb_pos, dealer_pos] if players[i].position != player.position]
+    else:
+        stack_of_players = len(bins) - np.digitize([players[sb_pos].chips, players[bb_pos].chips, 0], bins) - 1
+        last_actions = [players[i].last_action for i in [sb_pos, bb_pos] if players[i].position != player.position]
+        last_actions.append(-1)
+
+    street /= 3
+    stack_of_players = np.array(stack_of_players) / 7
+    last_actions = np.array(last_actions) / 6
+    
+    
+    obs = [card_idx,
+           hand_eval,
+           num_blind_increase,
+           street,
+           player_pos,
+           *stack_of_players,
+           *last_actions]
+
+    return obs
